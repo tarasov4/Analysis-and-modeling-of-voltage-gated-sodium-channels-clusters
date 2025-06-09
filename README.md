@@ -3,15 +3,4 @@ The code used in the manuscript: Tarasov et al. Clustering Dynamically Modulate 
 
 **Cell-attached recordings analysis**: contains functions to (1) load patch-clamp recording from .abf file, (2) adjust baseline of current sweeps, (3) measure single-channel amplitudes by fitting gaussian mixture distributions to all current amplitudes, (4) subtracting capacitive transient currents, (5) de-noisation (idealization) of current sweeps using the Viterbi algorithm, (6) plotting current sweeps, (7) ensemble averaging idealized current sweeps, (8) calculation of mean late sodium current by normalization to peak sodium currents in idealized current sweeps, (9) fitting ensemble-average peak sodium current decay to the exponential functions to estimate the time constant of peak current decay.
 
-Example of usage: 
-
-abf_file_path = '/content/drive/MyDrive/CHO1.5/23512051_25_mV_adjV2.abf'
-npy_file_path = '/content/drive/MyDrive/CHO1.5/23512051_25_mV_adjV2.npy'
-idealization_params_npy_file_path = '/content/drive/MyDrive/CHO1.5/23512051_25_mV_adjV2_params.npy'
-ideal_npy_file_path = '/content/drive/MyDrive/CHO1.5/23512051_25_mV_adjV2_ideal.npy'
-I_cap_subtract(25, abf_file_path, npy_file_path, idealization_params_npy_file_path)
-idealize(3, npy_file_path, idealization_params_npy_file_path, ideal_npy_file_path)
-plot_idealization(npy_file_path, ideal_npy_file_path, [0., 1000.])
-peak_INa_and_I_L_percent(ideal_npy_file_path)
-get_current_sweeps(npy_file_path, time_ms_window=[0., 120.], list_of_sweeps=[0, 239])
 
