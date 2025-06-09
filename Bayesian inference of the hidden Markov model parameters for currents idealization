@@ -1,0 +1,66 @@
+#visualize sweeps
+def concat_sweeps(paths_to_csv_file_after_Icap_subtraction):
+
+  recordings = []
+  for path_to_csv_file_after_Icap_subtraction in paths_to_csv_file_after_Icap_subtraction:
+    recording = tf.constant(pd.read_csv(path_to_csv_file_after_Icap_subtraction).fillna(0.).to_numpy(), dtype=tf.float32)
+    recordings.append(recording)
+  time = recordings[0][:,0]
+  start_idx = 0
+  end_idx = tf.where(tf.experimental.numpy.isclose(time-time[0], tf.constant(postpuls_cut, tf.float32), atol=0.01))[0][0]
+  time = tf.reshape(time, [-1,1])
+  time = time-time[0]
+  recordings = [recording[start_idx:end_idx,1:] for recording in recordings]
+  recordings = tf.concat([time[start_idx:end_idx]] + recordings, axis=1)
+  return recordings
+
+
+postpuls_cut=100
+paths_to_csv_file_after_Icap_subtraction = ['/content/drive/MyDrive/CHO1.5/22411024.csv',
+                                            '/content/drive/MyDrive/CHO1.5/23113001_4.csv',
+                                            '/content/drive/MyDrive/CHO1.5/231130012_17.csv',
+                                            '/content/drive/MyDrive/CHO1.5/23215010.csv',
+                                            '/content/drive/MyDrive/CHO1.5/22418014to21_adj.csv',
+                                            '/content/drive/MyDrive/CHO1.5/22418006_7_9_10_adj.csv'
+                                            ]
+
+recording = concat_sweeps(paths_to_csv_file_after_Icap_subtraction)
+time = recording[:,0]
+
+for sweep_num in range(1, recording.shape[1]):
+  plt.figure(figsize=[25,1.5])
+  plt.plot(time, recording[:,sweep_num])
+  plt.title(f'{sweep_num}')
+  plt.grid()
+  plt.xlim(0, 100)
+  plt.show()
+
+traning_sweeps = [129, 131, 139, 188, 1069, 1077, 1085, 1088, 1117, 1131, 1138, 1168, 1211, 1224, 1306, 1318, 1335, 1399, 1429, 1474, 1623, 1752]
+path_to_hmm_ideal_npy = '/content/drive/MyDrive/CHO1.5/Adam_signal_params.npy'
+Y = [recording[:, sweep_n] for sweep_n in traning_sweeps]
+num_steps =len(Y[0])
+trans_prob = 0.05
+transmat = np.full([2,2], trans_prob).astype('float32')
+transmat = tf.linalg.set_diag(transmat, 1-transmat.sum(axis=1)+trans_prob)
+
+model = tfd.JointDistributionSequentialAutoBatched([
+
+        tfd.Laplace(loc=[0,2], scale=1., name='true_i'),
+        tfd.Laplace(loc=[0,0], scale=1., name='noise'),
+        tfd.Exponential(rate=tf.fill(2, 1/30), name='nu'),
+        lambda nu, noise, true_i : tfd.Sample(tfd.HiddenMarkovModel(tfd.Categorical(logits=[0,0]),
+                                                    tfd.Categorical(probs=transmat),
+                                                    tfd.StudentT(df=nu+1, loc=true_i, scale=noise),
+                                                    num_steps=num_steps), sample_shape=len(Y))
+        ])
+
+init_i, init_noise, init_nu = tfd.Laplace(loc=[0,2], scale=1., name='true_i').sample(), tfd.Laplace(loc=[0,0], scale=1., name='noise').sample(), tfd.Exponential(rate=tf.fill(2, 1/30), name='nu').sample()
+i = tf.Variable(init_i, constraint=lambda i: tf.math.abs(i))
+noise = tf.Variable(init_noise, constraint=lambda noise: tf.math.abs(noise))
+nu = tf.Variable(init_nu)
+losses = tfp.math.minimize(loss_fn=lambda : -model.log_prob([i, noise, nu, Y]), num_steps=100, optimizer=tf.optimizers.Adam(0.1))
+plt.plot(losses)
+print(f'i={i}')
+print(f'noise={noise}')
+print(f'nu={nu}')
+#np.save(path_to_hmm_ideal_npy, np.stack([i.numpy(), noise.numpy(), nu.numpy()], axis=0))
