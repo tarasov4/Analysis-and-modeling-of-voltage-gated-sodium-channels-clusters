@@ -1,0 +1,211 @@
+# 1. load data
+
+#single channel records
+
+paths_to_idealized_csv = ['/content/drive/MyDrive/CHO1.5/23113001_4_hmm_ideal.csv',
+                          '/content/drive/MyDrive/CHO1.5/23215010_hmm_ideal.csv',
+                          '/content/drive/MyDrive/CHO1.5/23306022_hmm_ideal.csv',
+                          '/content/drive/MyDrive/CHO1.5/23310007_hmm_ideal.csv',
+                          '/content/drive/MyDrive/CHO1.5/cho15ctr_single_ch_4_hmm_ideal.csv',
+                          '/content/drive/MyDrive/CHO1.5/23126004_hmm.csv',
+                          '/content/drive/MyDrive/CHO1.5/23131005v2_1.23630_0.35_hmm.csv',
+                          '/content/drive/MyDrive/CHO1.5/23131009_hmm.csv'
+                          ]
+
+
+
+
+start_idx = 30
+end_idx = 1000
+df_s = []
+time = tf.convert_to_tensor(pd.read_csv(paths_to_idealized_csv[0]).values[start_idx:end_idx+1:,0], tf.float32)
+t = time - time[0]
+
+V = -40 #mV
+delta_t = time[1]-time[0]
+num_steps = len(t)
+
+
+for path in paths_to_idealized_csv:
+  df = pd.read_csv(path).values[start_idx:end_idx+1:,1:]
+  df_s.append(df)
+
+df_s = tf.convert_to_tensor(np.concatenate(df_s, axis=1), tf.float32)
+sweeps = tf.transpose(df_s)
+observed = sweeps
+true_P = df_s.numpy().mean(1)
+plt.plot(t, true_P)
+
+
+paths_to_csv_after_icap = ['/content/drive/MyDrive/CHO1.5/23113001_4.csv',
+                            '/content/drive/MyDrive/CHO1.5/23215010.csv',
+                            '/content/drive/MyDrive/CHO1.5/23306022.csv',
+                            '/content/drive/MyDrive/CHO1.5/23310007.csv',
+                            '/content/drive/MyDrive/CHO1.5/cho15ctr_single_ch_4.csv',
+                            '/content/drive/MyDrive/CHO1.5/23126004.csv',
+                            '/content/drive/MyDrive/CHO1.5/23131005v2_1.23630_0.35.csv',
+                            '/content/drive/MyDrive/CHO1.5/23131009.csv']
+
+true_df_s = []
+
+for path in paths_to_csv_after_icap:
+  df = pd.read_csv(path).values[start_idx:end_idx+1:,1:]
+  true_df_s.append(df)
+
+true_df_s = tf.convert_to_tensor(np.concatenate(true_df_s, axis=1), tf.float32)
+
+# 2. run inference
+def model(a11_v1, a11_v2, a12_, a13_, b11_v1, b11_v2, b12_, b13_, a3_v1, a3_v2, b3_v1, b3_v2, a2_v1, a2_v2, ax_, bx_, observed):
+  a11 = (a11_v1*tf.math.exp(-V/a11_v2))**-1
+  a12 = a12_*a11
+  a13 = a13_*a11
+  b11 = (b11_v1*tf.math.exp(V/b11_v2))**-1
+  b12 = b12_*b11
+  b13 = b13_*b11
+  a3 = a3_v1*tf.math.exp(-V/a3_v2)
+  b3 = b3_v1*tf.math.exp(V/b3_v2)
+  a2 = a2_v1*tf.math.exp(V/a2_v2)
+  b2 = (a13*a2*a3)/(b13*b3)
+  ax = ax_*a2
+  bx = bx_*a3
+
+        #   from    C3  IC3 C2  IC2  C1  IF  O  IS
+  row1 = tf.stack([0., a3, b11, 0., 0., 0., 0., 0.], axis=0) #into C3
+  row2 = tf.stack([b3, 0., 0., b11, 0., 0., 0., 0.], axis=0) #into IC3
+  row3 = tf.stack([a11, 0., 0., a3, b12, 0., 0., 0.], axis=0) # into C2
+  row4 = tf.stack([0., a11, b3, 0., 0., b12, 0., 0.], axis=0) # into IC2
+  row5 = tf.stack([0., 0., a12, 0., 0., a3, b13, 0], axis=0) # into C1
+  row6 = tf.stack([0., 0., 0., a12, b3, 0., a2, 0], axis=0) # into IF
+  row7 = tf.stack([0., 0., 0., 0., a13, b2, 0., bx], axis=0) # into O
+  row8 = tf.stack([0., 0., 0., 0., 0., 0., ax, 0.], axis=0) # into IS
+
+  matrix0 = tf.stack([row1, row2, row3, row4, row5, row6, row7, row8],axis=0)
+  diag = -1*tf.reduce_sum(matrix0, axis=0)
+  rate_matrix = tf.linalg.set_diag(matrix0, diag)
+  Q = tf.transpose(rate_matrix)
+  A = tf.linalg.expm(Q*delta_t)
+
+  s = tf.constant([1., 0., 0., 0., 0., 0., 0., 0.], tf.float32)
+  moreno_final = tf.constant([0.0076178, 32.764, 0.58871, 0.15422, 2.5898, 8.5072,
+                              0.001376, 2.888, 0.000032459, 9.5951, 1.3771, 21.126, 11.086, 43.725, 0.041476, 0.020802], tf.float32)
+  prior_log_prob = tfd.Independent(tfd.Normal(loc=moreno_final, scale=moreno_final), reinterpreted_batch_ndims=1).log_prob([a11_v1, a11_v2, a12_, a13_, b11_v1, b11_v2, b12_,
+                                                                                                                                b13_, a3_v1, a3_v2, b3_v1, b3_v2, a2_v1, a2_v2, ax_, bx_])
+  like = tfd.Sample(tfd.HiddenMarkovModel(initial_distribution = tfd.Categorical(probs=s),
+                                transition_distribution = tfd.Categorical(probs=A),
+                                observation_distribution = tfd.Deterministic(loc=tf.constant([0., 0., 0., 0., 0., 0., 1., 0.], tf.float32)),
+                                num_steps = num_steps), sample_shape=observed.shape[0])
+
+  return  prior_log_prob + like.log_prob(observed)
+
+target_log_prob = lambda *args: model(*args, observed)
+
+params_init = [0.0076178, 32.764, 0.58871, 0.15422, 2.5898, 8.5072, 0.001376, 2.888, 0.000032459, 9.5951, 1.3771, 21.126, 11.086, 43.725, 0.041476, 0.020802]
+hmc = tfp.mcmc.HamiltonianMonteCarlo(target_log_prob, [1. for _ in range(16)], 3)
+transofrmed_kernel = tfp.mcmc.TransformedTransitionKernel(hmc, [tfb.Softplus() for _ in range(16)])
+@tf.function(autograph=False)
+def run_chain(num_steps, num_burnin, transofrmed_kernel):
+  adapted_kernel = tfp.mcmc.DualAveragingStepSizeAdaptation(transofrmed_kernel, int(0.8*num_burnin))
+  samples = tfp.mcmc.sample_chain(num_results=num_steps,
+                                  current_state = params_init,
+                                  kernel=adapted_kernel,
+                                  num_burnin_steps=num_burnin,
+                                  trace_fn=None)
+  return samples
+
+mcmc_params = run_chain(num_steps=5000, num_burnin=1000, transofrmed_kernel=transofrmed_kernel)
+np.save('/content/drive/MyDrive/CHO1.5/nav1.5_moreno_mcmc_params_ver_7', np.array(mcmc_params)) # 5000 samples 1000 burnin Normal sigma==mean #done
+
+# 6. run deterministic simulation
+def determ_model_simulation(a11_v1, a11_v2, a12_, a13_, b11_v1, b11_v2, b12_, b13_, a3_v1, a3_v2, b3_v1, b3_v2, a2_v1, a2_v2, ax_, bx_):
+  a11 = (a11_v1*tf.math.exp(-V/a11_v2))**-1
+  a12 = a12_*a11
+  a13 = a13_*a11
+  b11 = (b11_v1*tf.math.exp(V/b11_v2))**-1
+  b12 = b12_*b11
+  b13 = b13_*b11
+  a3 = a3_v1*tf.math.exp(-V/a3_v2)
+  b3 = b3_v1*tf.math.exp(V/b3_v2)
+  a2 = a2_v1*tf.math.exp(V/a2_v2)
+  b2 = (a13*a2*a3)/(b13*b3)
+  ax = ax_*a2
+  bx = bx_*a3
+
+        #   from    C3  IC3 C2  IC2  C1  IF  O  IS
+  row1 = tf.stack([0., a3, b11, 0., 0., 0., 0., 0.], axis=0) #into C3
+  row2 = tf.stack([b3, 0., 0., b11, 0., 0., 0., 0.], axis=0) #into IC3
+  row3 = tf.stack([a11, 0., 0., a3, b12, 0., 0., 0.], axis=0) # into C2
+  row4 = tf.stack([0., a11, b3, 0., 0., b12, 0., 0.], axis=0) # into IC2
+  row5 = tf.stack([0., 0., a12, 0., 0., a3, b13, 0], axis=0) # into C1
+  row6 = tf.stack([0., 0., 0., a12, b3, 0., a2, 0], axis=0) # into IF
+  row7 = tf.stack([0., 0., 0., 0., a13, b2, 0., bx], axis=0) # into O
+  row8 = tf.stack([0., 0., 0., 0., 0., 0., ax, 0.], axis=0) # into IS
+
+  matrix0 = tf.stack([row1, row2, row3, row4, row5, row6, row7, row8],axis=0)
+  diag = -1*tf.reduce_sum(matrix0, axis=0)
+  Q = tf.cast(tf.linalg.set_diag(matrix0, diag), tf.float32)
+  s = tf.constant([1., 0., 0., 0., 0., 0., 0., 0.], tf.float32)
+  P0 = s[..., tf.newaxis]
+  time = tf.convert_to_tensor(t, tf.float32)
+  P = tf.concat([tf.linalg.matmul(tf.linalg.expm(t_*Q), P0) for t_ in time],axis=1)
+  return  P[6]
+
+a11_v1, a11_v2, a12_, a13_, b11_v1, b11_v2, b12_, b13_, a3_v1, a3_v2, b3_v1, b3_v2, a2_v1, a2_v2, ax_, bx_ = np.load('/content/drive/MyDrive/CHO1.5/nav1.5_moreno_mcmc_best_params_ver7.npy')
+a11_v1, a11_v2, a12_, a13_, b11_v1, b11_v2, b12_, b13_, a3_v1, a3_v2, b3_v1, b3_v2, a2_v1, a2_v2, ax_, bx_ = mcmc_params.mean(1)
+P_initial = determ_model_simulation(0.0076178, 32.764, 0.58871, 0.15422, 2.5898, 8.5072, 0.001376, 2.888, 0.000032459, 9.5951, 1.3771, 21.126, 11.086, 43.725, 0.041476, 0.020802)
+P_predict = determ_model_simulation(a11_v1, a11_v2, a12_, a13_, b11_v1, b11_v2, b12_, b13_, a3_v1, a3_v2, b3_v1, b3_v2, a2_v1, a2_v2, ax_, bx_)
+plt.plot(t,true_P, lw=4, alpha=0.7)
+plt.plot(t,P_initial, lw=4, alpha=0.7)
+plt.plot(t,P_predict, lw=4, alpha=0.7)
+
+# 7. run stochastic simulation
+def stoch_model_simulation(a11_v1, a11_v2, a12_, a13_, b11_v1, b11_v2, b12_, b13_, a3_v1, a3_v2, b3_v1, b3_v2, a2_v1, a2_v2, ax_, bx_, num_sweeps):
+  a11 = (a11_v1*tf.math.exp(-V/a11_v2))**-1
+  a12 = a12_*a11
+  a13 = a13_*a11
+  b11 = (b11_v1*tf.math.exp(V/b11_v2))**-1
+  b12 = b12_*b11
+  b13 = b13_*b11
+  a3 = a3_v1*tf.math.exp(-V/a3_v2)
+  b3 = b3_v1*tf.math.exp(V/b3_v2)
+  a2 = a2_v1*tf.math.exp(V/a2_v2)
+  b2 = (a13*a2*a3)/(b13*b3)
+  ax = ax_*a2
+  bx = bx_*a3
+
+        #   from    C3  IC3 C2  IC2  C1  IF  O  IS
+  row1 = tf.stack([0., a3, b11, 0., 0., 0., 0., 0.], axis=0) #into C3
+  row2 = tf.stack([b3, 0., 0., b11, 0., 0., 0., 0.], axis=0) #into IC3
+  row3 = tf.stack([a11, 0., 0., a3, b12, 0., 0., 0.], axis=0) # into C2
+  row4 = tf.stack([0., a11, b3, 0., 0., b12, 0., 0.], axis=0) # into IC2
+  row5 = tf.stack([0., 0., a12, 0., 0., a3, b13, 0], axis=0) # into C1
+  row6 = tf.stack([0., 0., 0., a12, b3, 0., a2, 0], axis=0) # into IF
+  row7 = tf.stack([0., 0., 0., 0., a13, b2, 0., bx], axis=0) # into O
+  row8 = tf.stack([0., 0., 0., 0., 0., 0., ax, 0.], axis=0) # into IS
+
+  matrix0 = tf.stack([row1, row2, row3, row4, row5, row6, row7, row8],axis=0)
+  diag = -1*tf.reduce_sum(matrix0, axis=0)
+  rate_matrix = tf.linalg.set_diag(matrix0, diag)
+  Q = tf.cast(tf.transpose(rate_matrix), tf.float32)
+  A = tf.linalg.expm(Q*delta_t)
+  like = tfd.Sample(tfd.HiddenMarkovModel(initial_distribution = tfd.Categorical(probs=[1., 0., 0., 0., 0., 0., 0., 0.]),
+                                transition_distribution = tfd.Categorical(probs=A),
+                                observation_distribution = tfd.Deterministic(loc=tf.constant([0., 0., 0., 0., 0., 0., 1., 0.], tf.float32)),
+                                num_steps = num_steps), num_sweeps)
+  return  like.sample()
+
+a11_v1, a11_v2, a12_, a13_, b11_v1, b11_v2, b12_, b13_, a3_v1, a3_v2, b3_v1, b3_v2, a2_v1, a2_v2, ax_, bx_ = np.load('/content/drive/MyDrive/CHO1.5/nav1.5_moreno_mcmc_best_params_ver6.npy')
+a11_v1, a11_v2, a12_, a13_, b11_v1, b11_v2, b12_, b13_, a3_v1, a3_v2, b3_v1, b3_v2, a2_v1, a2_v2, ax_, bx_ = mcmc_params.mean(1)
+sweeps_predict = stoch_model_simulation(a11_v1, a11_v2, a12_, a13_, b11_v1, b11_v2, b12_, b13_, a3_v1, a3_v2, b3_v1, b3_v2, a2_v1, a2_v2, ax_, bx_, 10000)
+P_pred_stoch = tf.reduce_mean(sweeps_predict, axis=0)
+sweeps_predict_init = stoch_model_simulation(0.0076178, 32.764, 0.58871, 0.15422, 2.5898, 8.5072, 0.001376, 2.888, 0.000032459, 9.5951, 1.3771, 21.126, 11.086, 43.725, 0.041476, 0.020802, 10000)
+P_pred_stoch_init = tf.reduce_mean(sweeps_predict_init, axis=0)
+
+plt.plot(t,true_P, lw=3, alpha=0.6)
+plt.plot(t,P_pred_stoch_init, lw=2, alpha=0.6)
+plt.plot(t,P_initial, lw=4, alpha=0.6)
+plt.show()
+
+plt.plot(t,true_P, lw=3, alpha=0.6)
+plt.plot(t,P_pred_stoch, lw=2, alpha=0.6)
+plt.plot(t,P_predict, lw=4, alpha=0.6)
+plt.show()
