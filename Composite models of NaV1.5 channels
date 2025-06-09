@@ -1,0 +1,619 @@
+class CnancyRudyAFM:
+
+  def __init__(self, n_channels, interaction):
+    self.n_channels = n_channels
+    self.interaction = interaction
+    self.s_init = np.zeros([4**self.n_channels, 1])
+    self.s_init[0] = 1.
+    self.make_composite_states()
+
+  def make_composite_states(self):
+    states = ['C', 'O', 'IF', 'IS']
+    comp_states = [a+b for a in states for b in states]
+    for k in range(self.n_channels-2):
+      comp_states = [a+b for a in comp_states for b in states]
+    self.comp_states = comp_states
+
+  def make_init_Q(self, v):
+    a11 = 3.802/(0.1027*np.exp(-v/17) + 0.2*np.exp(-v/150)) #rc3c2
+    a12 = 3.802/(0.1027*np.exp(-v/15) + 0.23*np.exp(-v/150)) #rc2c1
+    a13 = 2*3.802/(0.1027*np.exp(-v/12) + 0.25*np.exp(-v/150)) #rc1o #1.25* delta KPQ
+    b11 = 0.1917*np.exp(-v/20.3) #rc2c3
+    b12 = 0.2*np.exp(-(v-5)/20.3) #rc1c2
+    b13 = 0.22*np.exp(-(v-10)/20.3)#roc1
+    a2 = 9.178*np.exp(v/29.68) #roif
+    a3 = 3.7933*10**-10 * np.exp(-v/5.2) #rifc1
+    b3 = 0.0084 + 0.00002 * v #rc1if
+    b2 = (a13 * a2 * a3)/(b13 * b3) #rifo
+    a4 = a2/100
+    b4 = a3
+    Q = np.zeros((6, 6))
+    Q[0, 1] = b11
+    Q[1, 0], Q[1, 2] = a11, b12
+    Q[2, 1], Q[2, 3], Q[2, 4] = a12, b13, a3
+    Q[3, 2], Q[3, 4] = a13, b2
+    Q[4, 2], Q[4, 3], Q[4, 5] = b3, a2, b4
+    Q[5, 4] = a4
+    matrix0 = tf.convert_to_tensor(Q)
+    matrix0 = tf.gather(matrix0, [2,3,4,5], axis=1)
+    matrix0 = tf.gather(matrix0, [2,3,4,5], axis=0)
+    Q = matrix0.numpy()
+    for i in range(Q.shape[0]):
+      Q[i,i] = -Q[:,i].sum(0)
+    #states: C, O, IF, IS
+    assert np.all(np.isclose(Q.sum(0), np.zeros(Q.shape[0])))
+    return Q
+
+  def make_composite_Q(self, v):
+    Q = self.make_init_Q(v)
+    Q_comp = scipy.sparse.kronsum(Q, Q).todense()
+    for k in range(self.n_channels-2):
+      Q_comp = scipy.sparse.kronsum(Q_comp, Q).todense()
+    assert np.all(np.isclose(Q_comp.sum(0), np.zeros(Q_comp.shape[0])))
+    return Q_comp
+
+  def make_interacting_Q(self, v, kT):
+    states_to_scale_3_bonds = [self.n_channels*'C']
+    states_to_scale_0_bonds = [_ for _ in self.comp_states if _ not in states_to_scale_3_bonds]
+    indices_states_to_scale_3_bonds = [self.comp_states.index(com_state) for com_state in states_to_scale_3_bonds]
+    indices_states_to_scale_0_bonds = [self.comp_states.index(com_state) for com_state in states_to_scale_0_bonds]
+    Q_comp = self.make_composite_Q(v)
+    Q_comp_int = Q_comp.copy()
+    for ind in indices_states_to_scale_3_bonds:
+      for ind_0 in indices_states_to_scale_0_bonds:     #barr lower  #energy of the state reduced
+        Q_comp_int[ind_0:,ind] = Q_comp_int[ind_0:,ind]*np.exp(-kT)*np.exp(2*kT)
+        Q_comp_int[ind:,ind_0] = Q_comp_int[ind:,ind_0]*np.exp(-kT) #energy barier is reduced
+    for i in range(Q_comp_int.shape[0]):
+      Q_comp_int[i,i] = -Q_comp_int[:i,i].sum(0)-Q_comp_int[i+1:,i].sum(0)
+    return Q_comp_int
+
+  def make_s(self, v_hold, kT, delta_t, duration):
+    Q_hold = self.make_composite_Q(v_hold) if not self.interaction else self.make_interacting_Q(v_hold, kT)
+    s = self.s_init
+    A = scipy.linalg.expm(Q_hold*delta_t)
+    for _ in range(int(duration/delta_t)):
+      s = np.dot(A,s)
+    return s
+
+  def determ_P_t(self, v,  v_hold, kT, duration_at_v_hold, time):
+    delta_t = np.round(time[1]-time[0], 2)
+    Q = self.make_composite_Q(v) if not self.interaction else self.make_interacting_Q(v, kT)
+    s = self.make_s(v_hold, kT, delta_t, duration_at_v_hold)
+    T = time
+    Q = tf.convert_to_tensor(Q, tf.float32)
+    Q = Q[tf.newaxis, ...]
+    time_points = T.shape[0]
+    T = tf.convert_to_tensor(T, tf.float32)
+    T =  T[..., tf.newaxis, tf.newaxis]
+    Q_batch = tf.repeat(Q, repeats=time_points, axis=0)
+    Qt_batch = Q_batch*T
+    exp_Qt_batch = tf.linalg.expm(Qt_batch)
+    s = tf.convert_to_tensor(s, tf.float32)
+    P_t = tf.linalg.matmul(exp_Qt_batch, s).numpy().squeeze(-1).T
+    return P_t
+
+  def determ_sim_I(self, v,  v_hold, kT, duration_at_v_hold, time, i):
+
+    P_t = self.determ_P_t(v,  v_hold, kT, duration_at_v_hold, time)
+    I = np.zeros(P_t.shape[1])
+    for n in range(1, self.n_channels+1):
+      _idx = [state_idx for state_idx in range(len(self.comp_states)) if self.comp_states[state_idx].count('O')==n]
+      I = I + n*i*P_t[_idx].sum(0)
+    return I
+
+  def determ_sim_recovery(self, v,  v_hold, v_hold_P1_P2, kT, duration_at_v_hold, time, i, test_intervals):
+
+    P_t = self.determ_P_t(v,  v_hold, kT, duration_at_v_hold, time)
+    I_P1 = np.zeros(P_t.shape[1])
+    for n in range(1, self.n_channels+1):
+      _idx = [state_idx for state_idx in range(len(self.comp_states)) if self.comp_states[state_idx].count('O')==n]
+      I_P1 = I_P1 + n*i*P_t[_idx].sum(0)
+    self.s_init = P_t[:,-1].reshape([-1,1])
+    I_P2s = np.zeros([test_intervals.shape[0], time.shape[0]])
+    for idx in range(test_intervals.shape[0]):
+      I_P2s[idx] = self.determ_sim_I(v,  v_hold_P1_P2, kT, test_intervals[idx], time, i)
+
+    return I_P1, I_P2s
+
+n_channels = 2
+v_test = -40
+v_hold = -100
+v_hold_P1_P2 = -100
+kT = -.5
+duration_at_v_hold = 100
+i = -1.8
+time = np.arange(0., 30, 0.01)
+recovery_test_intervals = np.append(np.array([0.1]), np.arange(1, 50., 1.))
+
+chnnel_pair_nonint,  chnnel_pair_int = CnancyRudyAFM(n_channels, False), CnancyRudyAFM(n_channels, True)
+#I_nonint = chnnel_pair_nonint.determ_sim_I(v=v_test,  v_hold=v_hold, kT=kT, duration_at_v_hold=duration_at_v_hold, time=time, i=i)
+#I_int = chnnel_pair_int.determ_sim_I(v=v_test,  v_hold=v_hold, kT=kT, duration_at_v_hold=duration_at_v_hold, time=time, i=i)
+#plt.plot(time, I_nonint)
+#plt.plot(time, I_int)
+
+I_P1_nonint, I_P2s_nonint = chnnel_pair_nonint.determ_sim_recovery(v=v_test,  v_hold=v_hold, v_hold_P1_P2=v_hold_P1_P2, kT=kT, duration_at_v_hold=duration_at_v_hold, time=time, i=i, test_intervals=recovery_test_intervals)
+I_P1_int, I_P2s_int = chnnel_pair_int.determ_sim_recovery(v=v_test,  v_hold=v_hold, v_hold_P1_P2=v_hold_P1_P2, kT=kT, duration_at_v_hold=duration_at_v_hold, time=time, i=i, test_intervals=recovery_test_intervals)
+plt.scatter(recovery_test_intervals, I_P2s_nonint.min(1)/I_P1_nonint.min())
+plt.scatter(recovery_test_intervals, I_P2s_int.min(1)/I_P1_int.min())
+
+def batch_P_t(Q, s, T):
+  Q = tf.convert_to_tensor(Q, tf.float32)
+  Q = Q[tf.newaxis, ...]
+  time_points = T.shape[0]
+  T = tf.convert_to_tensor(T, tf.float32)
+  T =  T[..., tf.newaxis, tf.newaxis]
+  Q_batch = tf.repeat(Q, repeats=time_points, axis=0)
+  Qt_batch = Q_batch*T
+  exp_Qt_batch = tf.linalg.expm(Qt_batch)
+  s = tf.convert_to_tensor(s, tf.float32)
+  #return tf.concat([tf.linalg.matmul(exp_Qt_batch[idx], s) for idx in range(exp_Qt_batch.shape[0])],axis=1).numpy()
+  return tf.linalg.matmul(exp_Qt_batch, s).numpy().squeeze(-1).T
+
+def my_composite_Lido_model(n_channels, kT, scale):
+  # step 1. Make Q such as Q={qij} where qij is transition rate from state j to state i
+
+  T = np.arange(0., 10.01, 0.01)
+  late_T = np.arange(100., 105., 0.01)
+  V = -40
+  Vh = -120
+  def Clancy_Rudy_Q(v):
+
+    """Construct transition rate matrix of compound states
+    and change energies of states and barriers in case of interactions (interaction = 1 or interaction 2)"""
+
+    a11 = 3.802/(0.1027*np.exp(-v/17) + 0.2*np.exp(-v/150)) #rc3c2
+    a12 = 3.802/(0.1027*np.exp(-v/15) + 0.23*np.exp(-v/150)) #rc2c1
+    a13 = 2*3.802/(0.1027*np.exp(-v/12) + 0.25*np.exp(-v/150)) #rc1o #1.25* delta KPQ
+
+    b11 = 0.1917*np.exp(-v/20.3) #rc2c3
+    b12 = 0.2*np.exp(-(v-5)/20.3) #rc1c2
+    b13 = 0.22*np.exp(-(v-10)/20.3)#roc1
+
+    a2 = 9.178*np.exp(v/29.68) #roif
+    a3 = scale*3.7933*10**-10 * np.exp(-v/5.2) #rifc1
+
+    b3 = 0.0084 + 0.00002 * v #rc1if
+    b2 = scale*(a13 * a2 * a3)/(b13 * b3) #rifo
+    a4 = scale*a2/100
+    b4 = scale*a3
+
+    Q = np.zeros((6, 6))
+
+    Q[0, 1] = b11
+    Q[1, 0], Q[1, 2] = a11, b12
+    Q[2, 1], Q[2, 3], Q[2, 4] = a12, b13, a3
+    Q[3, 2], Q[3, 4] = a13, b2
+    Q[4, 2], Q[4, 3], Q[4, 5] = b3, a2, b4
+    Q[5, 4] = a4
+
+    matrix0 = tf.convert_to_tensor(Q)
+    matrix0 = tf.gather(matrix0, [2,3,4,5], axis=1)
+    matrix0 = tf.gather(matrix0, [2,3,4,5], axis=0)
+    Q = matrix0.numpy()
+    for i in range(Q.shape[0]):
+      Q[i,i] = -Q[:,i].sum(0)
+
+    #states: C, O, IF, IS
+    assert np.all(np.isclose(Q.sum(0), np.zeros(Q.shape[0])))
+    return Q
+
+  Q = Clancy_Rudy_Q(V)
+
+  # step 3. Make Kronoker sum of n Q matrixes
+
+  n = n_channels #number of channels
+
+  def make_Q_comp(Q):
+    Q_comp = scipy.sparse.kronsum(Q, Q).todense()
+    for k in range(n-2):
+      Q_comp = scipy.sparse.kronsum(Q_comp, Q).todense()
+
+    assert np.all(np.isclose(Q_comp.sum(0), np.zeros(Q_comp.shape[0])))
+    return Q_comp
+
+  Q_comp = make_Q_comp(Q)
+
+  #step 4. find indices of compound states to scale
+
+  states = ['C', 'O', 'IF', 'IS']
+  comp_states = [a+b for a in states for b in states]
+  for k in range(n-2):
+    comp_states = [a+b for a in comp_states for b in states]
+
+  states_to_scale_3_bonds = [n*'C']
+  states_to_scale_0_bonds = [_ for _ in comp_states if _ not in states_to_scale_3_bonds]
+
+  indices_states_to_scale_3_bonds = [comp_states.index(com_state) for com_state in states_to_scale_3_bonds]
+  indices_states_to_scale_0_bonds = [comp_states.index(com_state) for com_state in states_to_scale_0_bonds]
+
+  #step 5. scale trasition rates of exiting and entery from and into the compound states (change the energy of the state)
+
+  Q_comp_int = Q_comp.copy()
+
+  for ind in indices_states_to_scale_3_bonds:
+    for ind_0 in indices_states_to_scale_0_bonds:     #barr lower  #energy of the state reduced
+      Q_comp_int[ind_0:,ind] = Q_comp_int[ind_0:,ind]*np.exp(-kT)*np.exp(2*kT)
+      Q_comp_int[ind:,ind_0] = Q_comp_int[ind:,ind_0]*np.exp(-kT) #energy barier is reduced
+
+  for i in range(Q_comp_int.shape[0]):
+    Q_comp_int[i,i] = -Q_comp_int[:i,i].sum(0)-Q_comp_int[i+1:,i].sum(0)
+
+  # step 6. finde stationary dist vector s
+  Q_hold = Clancy_Rudy_Q(Vh)
+  Q_comp_hold = make_Q_comp(Q_hold)
+  Q_comp_hold_int = Q_comp_hold.copy()
+
+  for ind in indices_states_to_scale_3_bonds:
+    for ind_0 in indices_states_to_scale_0_bonds:
+      Q_comp_hold_int[ind_0:,ind] = Q_comp_hold_int[ind_0:,ind]*np.exp(-kT)*np.exp(2*kT)
+      Q_comp_hold_int[ind:,ind_0] = Q_comp_hold_int[ind:,ind_0]*np.exp(-kT)
+
+  for i in range(Q_comp_int.shape[0]):
+    Q_comp_hold_int[i,i] = -Q_comp_hold_int[:i,i].sum(0)-Q_comp_hold_int[i+1:,i].sum(0)
+
+  s = np.zeros(Q_comp.shape[0]).reshape([-1,1])
+  s[0,0] = 1.
+  A = scipy.linalg.expm(Q_comp_hold*0.01)
+  for _ in range(10000):
+    s = np.dot(A,s)
+
+  s_int = np.zeros(Q_comp.shape[0]).reshape([-1,1])
+  s_int[0,0] = 1.
+  A_int = scipy.linalg.expm(Q_comp_hold_int*0.01)
+  for _ in range(10000):
+    s_int = np.dot(A_int,s_int)
+
+  # step 7. find P(t)
+  #P_t = np.concatenate([scipy.linalg.expm(Q_comp*t).dot(s) for t in T], axis = 1)
+  P_t = batch_P_t(Q_comp, s, T)
+  #P_t_int = np.concatenate([scipy.linalg.expm(Q_comp_int*t).dot(s_int) for t in T], axis = 1)
+  P_t_int = batch_P_t(Q_comp_int, s_int, T)
+  #P_t_late = np.concatenate([scipy.linalg.expm(Q_comp*t).dot(s) for t in late_T], axis = 1)
+  P_t_late = batch_P_t(Q_comp, s, late_T)
+  #P_t_int_late = np.concatenate([scipy.linalg.expm(Q_comp_int*t).dot(s_int) for t in late_T], axis = 1)
+  P_t_int_late = batch_P_t(Q_comp_int, s_int, late_T)
+
+  # step 8. plotting result
+  zero_open_ch_idx = [state_idx for state_idx in range(len(comp_states)) if comp_states[state_idx].count('O')==0]
+  one_open_ch_idx = [state_idx for state_idx in range(len(comp_states)) if comp_states[state_idx].count('O')==1]
+  two_open_ch_idx = [state_idx for state_idx in range(len(comp_states)) if comp_states[state_idx].count('O')==2]
+  three_open_ch_idx = [state_idx for state_idx in range(len(comp_states)) if comp_states[state_idx].count('O')==3]
+  four_open_ch_idx = [state_idx for state_idx in range(len(comp_states)) if comp_states[state_idx].count('O')==4]
+
+  coefs_IF = np.array([comp_states[idx].count('IF') for idx in range(len(comp_states))]).reshape([-1,1])
+  coefs_IS = np.array([comp_states[idx].count('IS') for idx in range(len(comp_states))]).reshape([-1,1])
+  fraction_of_IF_Ch = (P_t*coefs_IF).sum(0)/n
+  fraction_of_IS_Ch = (P_t*coefs_IS).sum(0)/n
+  fraction_of_IF_Ch_int = (P_t_int * coefs_IF).sum(0)/n
+  fraction_of_IS_Ch_int = (P_t_int*coefs_IS).sum(0)/n
+
+  f0 = P_t[zero_open_ch_idx].sum(0)
+  f1 = P_t[one_open_ch_idx].sum(0)
+  f2 = P_t[two_open_ch_idx].sum(0)
+  f3 = P_t[three_open_ch_idx].sum(0)
+  f4 = P_t[four_open_ch_idx].sum(0)
+  f0_int = P_t_int[zero_open_ch_idx].sum(0)
+  f1_int = P_t_int[one_open_ch_idx].sum(0)
+  f2_int = P_t_int[two_open_ch_idx].sum(0)
+  f3_int = P_t_int[three_open_ch_idx].sum(0)
+  f4_int = P_t_int[four_open_ch_idx].sum(0)
+  fs = np.stack([f0, f1, f2, f3, f4], axis=0)
+  fs_int = np.stack([f0_int, f1_int, f2_int, f3_int, f4_int], axis=0)
+
+  def make_fs_hat(fs):
+    f_shut = np.sum([((n-k)/n)*fs[k] for k in range(n)],axis=0)
+    f_open = 1 - f_shut
+    fs_hat = np.stack([scipy.special.binom(n,k)*f_shut**(n-k)*f_open**k for k in range(0,n+1)],axis=0)
+    return fs_hat
+
+  fs_hat = make_fs_hat(fs)
+  fs_int_hat = make_fs_hat(fs_int)
+  Dkl = scipy.stats.entropy(fs[:n+1], fs_hat, axis=0)
+  Dkl_int = scipy.stats.entropy(fs_int[:n+1], fs_int_hat, axis=0)
+
+  i = 1.8
+  I = np.sum([-k*i*fs[k] for k in range(1, n+1)],axis=0)
+  I_int = np.sum([-k*i*fs_int[k] for k in range(1, n+1)],axis=0)
+
+  plt.plot(T, fs[1:n+1].T)
+  plt.plot(T, fs_hat[1:n+1].T) #np.concatenate([T.reshape([-1, 1]), fs_hat.T], axis=0)
+  plt.show()
+  plt.plot(T, fs_int[1:n+1].T)
+  plt.plot(T, fs_int_hat[1:n+1].T)
+  plt.show()
+
+  plt.plot(T, Dkl)
+  plt.plot(T, Dkl_int)
+  plt.show()
+
+  plt.plot(T, I)
+  plt.plot(T, I_int)
+  plt.show()
+
+  plt.plot(T, fraction_of_IF_Ch)
+  plt.plot(T, fraction_of_IF_Ch_int)
+  plt.show()
+  plt.plot(T, fraction_of_IS_Ch)
+  plt.plot(T, fraction_of_IS_Ch_int)
+  plt.show()
+
+
+  f0_late = P_t_late[zero_open_ch_idx].sum(0)
+  f1_late = P_t_late[one_open_ch_idx].sum(0)
+  f2_late = P_t_late[two_open_ch_idx].sum(0)
+  f3_late = P_t_late[three_open_ch_idx].sum(0)
+  f4_late = P_t_late[four_open_ch_idx].sum(0)
+  f0_int_late = P_t_int_late[zero_open_ch_idx].sum(0)
+  f1_int_late = P_t_int_late[one_open_ch_idx].sum(0)
+  f2_int_late = P_t_int_late[two_open_ch_idx].sum(0)
+  f3_int_late = P_t_int_late[three_open_ch_idx].sum(0)
+  f4_int_late = P_t_int_late[four_open_ch_idx].sum(0)
+
+  I_late = -1*i*f1_late+-2*i*f2_late+-3*i*f3_late+-4*i*f4_late
+  I_late_int = -1*i*f1_int_late+-2*i*f2_int_late+-3*i*f3_int_late+-4*i*f4_int_late
+
+  plt.plot(late_T, 100*I_late/I.min())
+  plt.plot(late_T, 100*I_late_int/I_int.min())
+  plt.show()
+
+
+  DkL_at_peak_I = Dkl[np.where(I==I.min())[0][0]]
+  DkL_at_peak_I_int = Dkl_int[np.where(I_int==I_int.min())[0][0]]
+
+  print('I_peak/I_late, %: ', 100*I_late.mean()/I.min())
+  print('I_peak/I_late interacting, %: ', 100*I_late_int.mean()/I_int.min())
+  print()
+  print('I peak: ', I.min())
+  print('I int peak: ', I_int.min())
+  print('DkL_at_peak_I: ', DkL_at_peak_I)
+  print('DkL_at_peak_I_int: ', DkL_at_peak_I_int)
+  print()
+
+
+  return pd.DataFrame(np.stack([T, I, I_int, Dkl, Dkl_int, fraction_of_IF_Ch, fraction_of_IF_Ch_int, fraction_of_IS_Ch, fraction_of_IS_Ch_int], axis=0).T,
+                      columns=['T', 'I', 'I_int', 'Dkl', 'Dkl_int', 'fraction_of_IF_Ch', 'fraction_of_IF_Ch_int', 'fraction_of_IS_Ch', 'fraction_of_IS_Ch_int'])
+df_lido = my_composite_Lido_model(n_channels=2, kT=-0.5, scale=1e-3) #scale of lido 1e-3
+
+#delta KPQ model
+
+def batch_P_t(Q, s, T):
+  Q = tf.convert_to_tensor(Q, tf.float32)
+  Q = Q[tf.newaxis, ...]
+  time_points = T.shape[0]
+  T = tf.convert_to_tensor(T, tf.float32)
+  T =  T[..., tf.newaxis, tf.newaxis]
+  Q_batch = tf.repeat(Q, repeats=time_points, axis=0)
+  Qt_batch = Q_batch*T
+  exp_Qt_batch = tf.linalg.expm(Qt_batch)
+  s = tf.convert_to_tensor(s, tf.float32)
+  #return tf.concat([tf.linalg.matmul(exp_Qt_batch[idx], s) for idx in range(exp_Qt_batch.shape[0])],axis=1).numpy()
+  return tf.linalg.matmul(exp_Qt_batch, s).numpy().squeeze(-1).T
+
+def my_composite_deltaKPQ_model(n_channels, kT, μ1, μ2):
+  # step 1. Make Q such as Q={qij} where qij is transition rate from state j to state i
+
+  T = np.arange(0., 10.01, 0.01)
+  late_T = np.arange(100., 105., 0.01)
+  V = -40
+  Vh = -120
+  def Clancy_Rudy_Q(v):
+
+    """Construct transition rate matrix of compound states
+    and change energies of states and barriers in case of interactions (interaction = 1 or interaction 2)"""
+
+    a11 = 3.802/(0.1027*np.exp(-v/17) + 0.2*np.exp(-v/150)) #rc3c2
+    a12 = 3.802/(0.1027*np.exp(-v/15) + 0.23*np.exp(-v/150)) #rc2c1
+    a13 = 2*3.802/(0.1027*np.exp(-v/12) + 0.25*np.exp(-v/150)) #rc1o #1.25* delta KPQ
+
+    b11 = 0.1917*np.exp(-v/20.3) #rc2c3
+    b12 = 0.2*np.exp(-(v-5)/20.3) #rc1c2
+    b13 = 0.22*np.exp(-(v-10)/20.3)#roc1
+
+    a2 = 9.178*np.exp(v/29.68) #roif
+    a3 = 3.7933*10**-10 * np.exp(-v/5.2) #rifc1
+
+    b3 = 0.0084 + 0.00002 * v #rc1if
+    b2 = (a13 * a2 * a3)/(b13 * b3) #rifo
+    a4 = a2/100
+    b4 = a3
+
+    Q = np.zeros((8, 8))
+
+    Q[0, 1] = b11
+    Q[1, 0], Q[1, 2] = a11, b12
+    Q[2, 1], Q[2, 3], Q[2, 4] = a12, b13, a3
+    Q[3, 2], Q[3, 4] = a13, b2
+    Q[4, 2], Q[4, 3], Q[4, 5] = b3, a2, b4
+    Q[5, 4] = a4
+    Q[6, 2] = Q[7, 3] = μ1
+    Q[2, 6] = Q[3, 7] = μ2
+    Q[7,6] = Q[3,2]
+    Q[6,7] = Q[2,3]
+
+    matrix0 = tf.convert_to_tensor(Q)
+    matrix0 = tf.gather(matrix0, [2,3,4,5,6,7], axis=1)
+    matrix0 = tf.gather(matrix0, [2,3,4,5,6,7], axis=0)
+    Q = matrix0.numpy()
+    for i in range(Q.shape[0]):
+      Q[i,i] = -Q[:,i].sum(0)
+
+    #states: C, O, IF, IS
+    assert np.all(np.isclose(Q.sum(0), np.zeros(Q.shape[0])))
+    return Q
+
+  Q = Clancy_Rudy_Q(V)
+
+  # step 3. Make Kronoker sum of n Q matrixes
+
+  n = n_channels #number of channels
+
+  def make_Q_comp(Q):
+    Q_comp = scipy.sparse.kronsum(Q, Q).todense()
+    for k in range(n-2):
+      Q_comp = scipy.sparse.kronsum(Q_comp, Q).todense()
+
+    assert np.all(np.isclose(Q_comp.sum(0), np.zeros(Q_comp.shape[0])))
+    return Q_comp
+
+  Q_comp = make_Q_comp(Q)
+
+  #step 4. find indices of compound states to scale
+
+  states = ['C', 'O', 'IF', 'IS', 'UC', 'UO']
+  comp_states = [a+b for a in states for b in states]
+  for k in range(n-2):
+    comp_states = [a+b for a in comp_states for b in states]
+
+  states_to_scale_3_bonds = [n*'C', n*'UC']
+  states_to_scale_0_bonds = [_ for _ in comp_states if _ not in states_to_scale_3_bonds]
+
+  indices_states_to_scale_3_bonds = [comp_states.index(com_state) for com_state in states_to_scale_3_bonds]
+  indices_states_to_scale_0_bonds = [comp_states.index(com_state) for com_state in states_to_scale_0_bonds]
+
+  #step 5. scale trasition rates of exiting and entery from and into the compound states (change the energy of the state)
+
+  Q_comp_int = Q_comp.copy()
+
+  for ind in indices_states_to_scale_3_bonds:
+    for ind_0 in indices_states_to_scale_0_bonds:     #barr lower  #energy of the state reduced
+      Q_comp_int[ind_0:,ind] = Q_comp_int[ind_0:,ind]*np.exp(-kT)*np.exp(2*kT)
+      Q_comp_int[ind:,ind_0] = Q_comp_int[ind:,ind_0]*np.exp(-kT) #energy barier is reduced
+
+  for i in range(Q_comp_int.shape[0]):
+    Q_comp_int[i,i] = -Q_comp_int[:i,i].sum(0)-Q_comp_int[i+1:,i].sum(0)
+
+  # step 6. finde stationary dist vector s
+  Q_hold = Clancy_Rudy_Q(Vh)
+  Q_comp_hold = make_Q_comp(Q_hold)
+  Q_comp_hold_int = Q_comp_hold.copy()
+
+  for ind in indices_states_to_scale_3_bonds:
+    for ind_0 in indices_states_to_scale_0_bonds:
+      Q_comp_hold_int[ind_0:,ind] = Q_comp_hold_int[ind_0:,ind]*np.exp(-kT)*np.exp(2*kT)
+      Q_comp_hold_int[ind:,ind_0] = Q_comp_hold_int[ind:,ind_0]*np.exp(-kT)
+
+  for i in range(Q_comp_int.shape[0]):
+    Q_comp_hold_int[i,i] = -Q_comp_hold_int[:i,i].sum(0)-Q_comp_hold_int[i+1:,i].sum(0)
+
+  s = np.zeros(Q_comp.shape[0]).reshape([-1,1])
+  s[0,0] = 1.
+  A = scipy.linalg.expm(Q_comp_hold*0.01)
+  for _ in range(10000):
+    s = np.dot(A,s)
+
+  s_int = np.zeros(Q_comp.shape[0]).reshape([-1,1])
+  s_int[0,0] = 1.
+  A_int = scipy.linalg.expm(Q_comp_hold_int*0.01)
+  for _ in range(10000):
+    s_int = np.dot(A_int,s_int)
+
+  # step 7. find P(t)
+  #P_t = np.concatenate([scipy.linalg.expm(Q_comp*t).dot(s) for t in T], axis = 1)
+  P_t = batch_P_t(Q_comp, s, T)
+  #P_t_int = np.concatenate([scipy.linalg.expm(Q_comp_int*t).dot(s_int) for t in T], axis = 1)
+  P_t_int = batch_P_t(Q_comp_int, s_int, T)
+  #P_t_late = np.concatenate([scipy.linalg.expm(Q_comp*t).dot(s) for t in late_T], axis = 1)
+  P_t_late = batch_P_t(Q_comp, s, late_T)
+  #P_t_int_late = np.concatenate([scipy.linalg.expm(Q_comp_int*t).dot(s_int) for t in late_T], axis = 1)
+  P_t_int_late = batch_P_t(Q_comp_int, s_int, late_T)
+
+  # step 8. plotting result
+  zero_open_ch_idx = [state_idx for state_idx in range(len(comp_states)) if comp_states[state_idx].count('O')==0]
+  one_open_ch_idx = [state_idx for state_idx in range(len(comp_states)) if comp_states[state_idx].count('O')==1]
+  two_open_ch_idx = [state_idx for state_idx in range(len(comp_states)) if comp_states[state_idx].count('O')==2]
+  three_open_ch_idx = [state_idx for state_idx in range(len(comp_states)) if comp_states[state_idx].count('O')==3]
+  four_open_ch_idx = [state_idx for state_idx in range(len(comp_states)) if comp_states[state_idx].count('O')==4]
+
+  coefs_IF = np.array([comp_states[idx].count('IF') for idx in range(len(comp_states))]).reshape([-1,1])
+  coefs_IS = np.array([comp_states[idx].count('IS') for idx in range(len(comp_states))]).reshape([-1,1])
+  fraction_of_IF_Ch = (P_t*coefs_IF).sum(0)/n
+  fraction_of_IS_Ch = (P_t*coefs_IS).sum(0)/n
+  fraction_of_IF_Ch_int = (P_t_int * coefs_IF).sum(0)/n
+  fraction_of_IS_Ch_int = (P_t_int*coefs_IS).sum(0)/n
+
+  f0 = P_t[zero_open_ch_idx].sum(0)
+  f1 = P_t[one_open_ch_idx].sum(0)
+  f2 = P_t[two_open_ch_idx].sum(0)
+  f3 = P_t[three_open_ch_idx].sum(0)
+  f4 = P_t[four_open_ch_idx].sum(0)
+  f0_int = P_t_int[zero_open_ch_idx].sum(0)
+  f1_int = P_t_int[one_open_ch_idx].sum(0)
+  f2_int = P_t_int[two_open_ch_idx].sum(0)
+  f3_int = P_t_int[three_open_ch_idx].sum(0)
+  f4_int = P_t_int[four_open_ch_idx].sum(0)
+  fs = np.stack([f0, f1, f2, f3, f4], axis=0)
+  fs_int = np.stack([f0_int, f1_int, f2_int, f3_int, f4_int], axis=0)
+
+  def make_fs_hat(fs):
+    f_shut = np.sum([((n-k)/n)*fs[k] for k in range(n)],axis=0)
+    f_open = 1 - f_shut
+    fs_hat = np.stack([scipy.special.binom(n,k)*f_shut**(n-k)*f_open**k for k in range(0,n+1)],axis=0)
+    return fs_hat
+
+  fs_hat = make_fs_hat(fs)
+  fs_int_hat = make_fs_hat(fs_int)
+  Dkl = scipy.stats.entropy(fs[:n+1], fs_hat, axis=0)
+  Dkl_int = scipy.stats.entropy(fs_int[:n+1], fs_int_hat, axis=0)
+
+  i = 1.8
+  I = np.sum([-k*i*fs[k] for k in range(1, n+1)],axis=0)
+  I_int = np.sum([-k*i*fs_int[k] for k in range(1, n+1)],axis=0)
+
+  plt.plot(T, fs[1:n+1].T)
+  plt.plot(T, fs_hat[1:n+1].T) #np.concatenate([T.reshape([-1, 1]), fs_hat.T], axis=0)
+  plt.show()
+  plt.plot(T, fs_int[1:n+1].T)
+  plt.plot(T, fs_int_hat[1:n+1].T)
+  plt.show()
+
+  plt.plot(T, Dkl)
+  plt.plot(T, Dkl_int)
+  plt.show()
+
+  plt.plot(T, I)
+  plt.plot(T, I_int)
+  plt.show()
+
+  plt.plot(T, fraction_of_IF_Ch)
+  plt.plot(T, fraction_of_IF_Ch_int)
+  plt.show()
+  plt.plot(T, fraction_of_IS_Ch)
+  plt.plot(T, fraction_of_IS_Ch_int)
+  plt.show()
+
+
+  f0_late = P_t_late[zero_open_ch_idx].sum(0)
+  f1_late = P_t_late[one_open_ch_idx].sum(0)
+  f2_late = P_t_late[two_open_ch_idx].sum(0)
+  f3_late = P_t_late[three_open_ch_idx].sum(0)
+  f4_late = P_t_late[four_open_ch_idx].sum(0)
+  f0_int_late = P_t_int_late[zero_open_ch_idx].sum(0)
+  f1_int_late = P_t_int_late[one_open_ch_idx].sum(0)
+  f2_int_late = P_t_int_late[two_open_ch_idx].sum(0)
+  f3_int_late = P_t_int_late[three_open_ch_idx].sum(0)
+  f4_int_late = P_t_int_late[four_open_ch_idx].sum(0)
+
+  I_late = -1*i*f1_late+-2*i*f2_late+-3*i*f3_late+-4*i*f4_late
+  I_late_int = -1*i*f1_int_late+-2*i*f2_int_late+-3*i*f3_int_late+-4*i*f4_int_late
+
+  plt.plot(late_T, 100*I_late/I.min())
+  plt.plot(late_T, 100*I_late_int/I_int.min())
+  plt.show()
+
+
+  DkL_at_peak_I = Dkl[np.where(I==I.min())[0][0]]
+  DkL_at_peak_I_int = Dkl_int[np.where(I_int==I_int.min())[0][0]]
+
+  print('I_peak/I_late, %: ', 100*I_late.mean()/I.min())
+  print('I_peak/I_late interacting, %: ', 100*I_late_int.mean()/I_int.min())
+  print()
+  print('I peak: ', I.min())
+  print('I int peak: ', I_int.min())
+  print('DkL_at_peak_I: ', DkL_at_peak_I)
+  print('DkL_at_peak_I_int: ', DkL_at_peak_I_int)
+  print()
+
+
+  return pd.DataFrame(np.stack([T, I, I_int, Dkl, Dkl_int, fraction_of_IF_Ch, fraction_of_IF_Ch_int, fraction_of_IS_Ch, fraction_of_IS_Ch_int], axis=0).T,
+                      columns=['T', 'I', 'I_int', 'Dkl', 'Dkl_int', 'fraction_of_IF_Ch', 'fraction_of_IF_Ch_int', 'fraction_of_IS_Ch', 'fraction_of_IS_Ch_int']),  I_late, I_late_int
+df_deltaKPQ, I_late,  I_late_int = my_composite_deltaKPQ_model(n_channels=2, kT=-0.5, μ1=7*10**-4, μ2 = 2*10**-6)
