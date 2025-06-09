@@ -1,0 +1,112 @@
+import numpy as np
+import pandas as pd
+import scipy
+import tensorflow as tf
+import tensorflow_probability as tfp
+tfd = tfp.distributions
+import matplotlib.pyplot as plt
+
+def mean_var_fit(path, obs, num_steps=500):
+  if obs: data = pd.read_csv(path).values[:,1:].T
+  else: data = np.load(path)
+
+  k_max =  data.ravel().max()
+  vars_ = data.var(0)
+  means_ = data.mean(0)
+  model = lambda x, n : x - (x**2)/n
+  popt, pcov = scipy.optimize.curve_fit(model, means_, vars_, k_max)
+  plt.scatter(means_, vars_)
+  plt.plot(means_, model(means_, popt[0]))
+  plt.show()
+  D = []
+  for idx in range(num_steps):
+    data_t = data[:,idx]
+    k, k_counts = np.unique(data_t, return_counts=True)
+    pk = k_counts/k_counts.sum()
+    qk = tfd.Binomial(total_count=popt[0], probs=means_[idx]/popt[0]).prob(k)
+    D.append(scipy.stats.entropy(pk, qk))
+  return D, (vars_-model(means_, popt[0]))**2
+
+def Dkl(list_of_paths, obs):
+
+  Ds = []
+  R2s = []
+  count = 0
+  for path in list_of_paths:
+    D, R2 = mean_var_fit(path, obs)
+    Ds.append(D)
+    R2s.append(R2[:500])
+    print(f'{count}')
+    count += 1
+  return np.stack(Ds, axis=0), np.stack(R2s, axis=0)
+
+def ens_aver_I(list_of_paths, obs, i):
+  if obs: data = lambda path : i*pd.read_csv(path).values[:900,1:].T.mean(0)
+  else: data = lambda path : i*np.load(path).mean(0)
+  return np.stack([data(path) for path in list_of_paths],axis=0)
+
+def decay_fit(path, obs, plot):
+  if obs: data = pd.read_csv(path).values[:,1:].T
+  else: data = np.load(path)
+  i = data.mean(0)*1.8
+  start_idx = np.where(i==i.max())[0][0] + 50
+  end_dx = int(start_idx+20*100)
+  signal = i[start_idx:end_dx]
+  signal = signal-signal[-200:].mean()
+  signal = signal/signal[0]
+  t = 0.01*np.arange(signal.shape[0])
+  model = lambda t, tau : np.exp(-t/tau)
+  popt, pcov = scipy.optimize.curve_fit(model, t, signal)
+  if plot:
+    plt.scatter(t, signal, alpha=0.2)
+    plt.plot(t, model(t, popt[0]), lw=2, color='red')
+    plt.show()
+  tau_ms = popt[0]
+  return tau_ms
+
+
+def taus(list_of_paths, obs):
+
+  taus = []
+  for idx in range(len(list_of_paths)):
+    taus.append(decay_fit(list_of_paths[idx], obs=True, plot=True))
+  return taus
+
+def time_to_peak(path, obs):
+  if obs: data = pd.read_csv(path).values[:,1:].T
+  else: data = np.load(path)
+  mean_ = data.mean(0)
+  start_idx = np.where(data!= 0.)[1].min()
+  peak_idx = np.where(mean_== mean_.max())[0][0]
+  return 0.01*(peak_idx - start_idx)
+
+def times_to_peak(list_of_paths, obs):
+
+  taus = []
+  for idx in range(len(list_of_paths)):
+    taus.append(time_to_peak(list_of_paths[idx], obs=True))
+  return taus
+
+#var to mean ratio
+
+def DC(path, obs):
+
+  if obs: data = pd.read_csv(path).values[:,1:].T
+  else: data = np.load(path)
+  data = -1.9*data
+
+
+  var_ = data.var(0)
+  mean_ = data.mean(0)
+
+  DC = var_/mean_
+  return np.nan_to_num(DC[:500])
+
+
+def batch_DC(paths_lst, obs):
+  DC_array = np.zeros([len(paths_lst), 500])
+  for idx in range(len(paths_lst)):
+    DC_=   DC(paths_lst[idx], obs)
+    DC_array[idx] = DC_
+
+  return DC_array
