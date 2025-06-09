@@ -1,0 +1,63 @@
+import tensorflow as tf
+import tensorflow_probability as tfp
+tfd = tfp.distributions
+tfb = tfp.bijectors
+import matplotlib.pyplot as plt
+import pandas as pd
+import numpy as np
+import seaborn as sns
+import scipy
+import copy
+import multiprocessing
+
+def get_A(V):
+  a11 = (a11_v1*tf.math.exp(-V/a11_v2))**-1
+  a12 = a12_*a11
+  a13 = a13_*a11
+  b11 = (b11_v1*tf.math.exp(V/b11_v2))**-1
+  b12 = b12_*b11
+  b13 = b13_*b11
+  a3 = a3_v1*tf.math.exp(-V/a3_v2)
+  b3 = b3_v1*tf.math.exp(V/b3_v2)
+  a2 = a2_v1*tf.math.exp(V/a2_v2)
+  b2 = (a13*a2*a3)/(b13*b3)
+  ax = ax_*a2
+  bx = bx_*a3
+
+
+        #   from    C3  IC3 C2  IC2  C1  IF  O  IS
+  row1 = tf.stack([0., a3, b11, 0., 0., 0., 0., 0.], axis=0) #into C3
+  row2 = tf.stack([b3, 0., 0., b11, 0., 0., 0., 0.], axis=0) #into IC3
+  row3 = tf.stack([a11, 0., 0., a3, b12, 0., 0., 0.], axis=0) # into C2
+  row4 = tf.stack([0., a11, b3, 0., 0., b12, 0., 0.], axis=0) # into IC2
+  row5 = tf.stack([0., 0., a12, 0., 0., a3, b13, 0], axis=0) # into C1
+  row6 = tf.stack([0., 0., 0., a12, b3, 0., a2, 0], axis=0) # into IF
+  row7 = tf.stack([0., 0., 0., 0., a13, b2, 0., bx], axis=0) # into O
+  row8 = tf.stack([0., 0., 0., 0., 0., 0., ax, 0.], axis=0) # into IS
+
+  matrix0 = tf.stack([row1, row2, row3, row4, row5, row6, row7, row8],axis=0)
+  diag = -1*tf.reduce_sum(matrix0, axis=0)
+  rate_matrix = tf.linalg.set_diag(matrix0, diag)
+  Q = tf.cast(tf.transpose(rate_matrix), tf.float32)
+  A = tf.linalg.expm(Q*delta_t)
+  return A
+
+def get_Naundorf_sweeps(J, num_channels, num_sweeps):
+  def get_Naundorf_sweep(J, num_channels):
+    init_dist = tfd.Categorical(probs=[1., 0., 0., 0., 0., 0., 0., 0.])
+    obs_dist = tf.constant([0., 0., 0., 0., 0., 0., 1., 0.])
+    stoch_state_paths = np.zeros([num_channels, num_steps])
+    stoch_obs_paths = np.zeros([num_channels, num_steps])
+    stoch_state_paths[:,0] = init_dist.sample(num_channels)
+    stoch_obs_paths[:,0] = tf.gather(obs_dist, tf.cast(stoch_state_paths[:,0], tf.int32))
+    for step in range(1, num_steps):
+      shift = (J*stoch_obs_paths[:, step-1]).sum(0)
+      A = get_A(V+shift)
+      next_states = tfd.Categorical(probs=tf.gather(A, tf.cast(stoch_state_paths[:,step-1], tf.int32), axis=0)).sample()
+      stoch_state_paths[:,step] = next_states
+      stoch_obs_paths[:,step] = tf.gather(obs_dist, tf.cast(stoch_state_paths[:,step], tf.int32))
+    return stoch_obs_paths.sum(0)
+  sweeps = np.zeros([num_sweeps, num_steps])
+  for sweep in range(num_sweeps):
+    sweeps[sweep] = get_Naundorf_sweep(J, num_channels)
+  return sweeps
