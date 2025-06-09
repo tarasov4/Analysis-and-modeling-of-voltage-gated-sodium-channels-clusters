@@ -1,0 +1,53 @@
+#probability of contact vs current
+probs_of_interaction = []
+I_peaks, R_persists = [], []
+I_peaks_nonint_only, R_persists_nonint_only = [], []
+X_Ys = []
+Num_channels = [100, 200, 500, 1000, 1500, 2000]
+diameter = 10 #nm
+total_diameter = 1000 #nm
+grid_shape = (int(total_diameter/diameter), int(total_diameter/diameter))
+grid_size = int(total_diameter/diameter)**2
+for N_channels in Num_channels:
+  #N_channels = 2000
+
+  positions = np.random.choice(np.arange(grid_size), replace=False, size=N_channels)
+  X_Y = np.array([(x,y) for x in range(grid_shape[0]) for y in range(grid_shape[1])])
+  X_Y = X_Y[positions]
+  X_Y = X_Y.reshape([2,-1])
+  X, Y = X_Y[0], X_Y[1]
+  plt.scatter(diameter*X,diameter*Y, alpha=0.3)
+  plt.xlim(-100, 1100)
+  plt.ylim(-100, 1100)
+  plt.show()
+
+  interacting_particles = []
+  for idx in range(X_Y.shape[1]):
+    dist = np.sqrt(np.sum((X_Y[:,idx].reshape([-1,1]) - X_Y)**2,axis=0))
+    interactions_array = np.where(dist==1., 1., 0.)
+    number_of_interacting_distancies = float(interactions_array.sum(0))
+    if number_of_interacting_distancies>0:
+      interacting_particles.append(idx)
+
+  prob_of_interaction = len(interacting_particles)/N_channels
+  probs_of_interaction.append(prob_of_interaction)
+
+  num_interacint_paries = len(interacting_particles)/2
+  num_non_interacting_paires = (N_channels - len(interacting_particles))/2
+  I_late_tot = I_late_int.mean()*num_interacint_paries + I_late.mean()*num_non_interacting_paires
+  I_late_tot_nonint_only = I_late.mean()*num_interacint_paries + I_late.mean()*num_non_interacting_paires
+  I_peak_tot = df_deltaKPQ.I_int.min()*num_interacint_paries + df_deltaKPQ.I.min()*num_non_interacting_paires
+  I_peak_tot_nonint_only = df_deltaKPQ.I.min()*num_interacint_paries + df_deltaKPQ.I.min()*num_non_interacting_paires
+  R_persist_tot = 100*(I_late_tot/I_peak_tot)
+  R_persist_tot_nonint_only = 100*(I_late_tot_nonint_only/I_peak_tot_nonint_only)
+  I_peaks.append(I_peak_tot)
+  I_peaks_nonint_only.append(I_peak_tot_nonint_only)
+  R_persists.append(R_persist_tot)
+  R_persists_nonint_only.append(R_persist_tot_nonint_only)
+  X_Ys.append(X_Y)
+plt.plot(Num_channels, probs_of_interaction, '-o')
+plt.show()
+plt.scatter(I_peaks_nonint_only, R_persists_nonint_only)
+plt.show()
+plt.scatter(I_peaks, R_persists)
+plt.show()
