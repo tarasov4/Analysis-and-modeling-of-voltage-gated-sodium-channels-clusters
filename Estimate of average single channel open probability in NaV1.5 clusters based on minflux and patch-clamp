@@ -1,0 +1,101 @@
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+import tensorflow as tf
+import tensorflow_probability as tfp
+tfd = tfp.distributions
+tfb = tfp.bijectors
+import pymc as pm
+import arviz as az
+import sklearn
+import scipy
+import sklearn.cluster
+import PIL
+import scipy.io as sio
+
+ctr_minflux_data = sio.loadmat('/content/drive/MyDrive/Biophys paper/Minflux results/resultsControl (1)')
+txl_minflux_data = sio.loadmat('/content/drive/MyDrive/Biophys paper/Minflux results/resultsTaxol')
+dKPQ_minflux_data = sio.loadmat('/content/drive/MyDrive/Biophys paper/Minflux results/resultsDKPQcontrol (1)')
+dKPQ_SB2_minflux_data = sio.loadmat('/content/drive/MyDrive/Biophys paper/Minflux results/resultsDKPQSB2 (1)')
+WT_minflux_data = sio.loadmat('/content/drive/MyDrive/Biophys paper/Minflux results/resultscontrol (3)')
+WT_SB2_minflux_data = sio.loadmat('/content/drive/MyDrive/Biophys paper/Minflux results/resultsSB2 (1)')
+
+
+#make hist
+bins = np.arange(0., .1, 0.003)
+bins_centers = bins[:-1]+0.5*np.diff(bins)
+ctr_hist, txl_hist = np.histogram(ctr_minflux_data['cluster_density_values_group1'].ravel(), bins, density=True)[0], np.histogram(txl_minflux_data['cluster_density_values_group2'].ravel(), bins, density=True)[0]
+#pd.DataFrame(dict(bins_centers=bins_centers, ctr_hist=ctr_hist, txl_hist=txl_hist))
+plt.hist(ctr_minflux_data['cluster_density_values_group1'].ravel(), bins, density=True, alpha=0.3)
+plt.hist(txl_minflux_data['cluster_density_values_group2'].ravel(), bins, density=True, alpha=0.3)
+plt.yscale('log')
+plt.show()
+
+#inverse transform sampling
+
+
+def inverse_transform_samples(empirical_samples, num_samples):
+  samples = np.sort(empirical_samples)
+  emp_PDF, bins = np.histogram(samples, 1000, density=True)
+  emp_CDF = np.cumsum(emp_PDF)
+  emp_CDF = emp_CDF/emp_CDF.max()
+  inds = np.where(np.diff(emp_CDF)>1e-8)[0]+1
+  X_ = bins[:-1][inds]
+  emp_CDF_ = emp_CDF[inds]
+  U = np.random.uniform(0., 1., num_samples-1)
+  U = np.concatenate([U, [1.]])
+  return scipy.interpolate.make_smoothing_spline(emp_CDF_, X_)(U)
+
+def emp_CDF(samples):
+  samples = np.sort(samples)
+  emp_PDF, bins = np.histogram(samples, 1000, density=True)
+  emp_CDF = np.cumsum(emp_PDF)
+  emp_CDF = emp_CDF/emp_CDF.max()
+  return bins[:-1], emp_CDF
+
+#samples = ctr_minflux_data['cluster_density_values_group1'].ravel()
+#X0, emp_CDF0 = emp_CDF(samples)
+#emp_samples = inverse_transform_samples(samples, 2000)
+#X1, emp_CDF1 = emp_CDF(emp_samples)
+
+#plt.plot(X0, emp_CDF0)
+#plt.plot(X1, emp_CDF1)
+#plt.show()
+
+#samples = txl_minflux_data['cluster_density_values_group2'].ravel()
+#X0, emp_CDF0 = emp_CDF(samples)
+#emp_samples = inverse_transform_samples(samples, 2000)
+#X1, emp_CDF1 = emp_CDF(emp_samples)
+
+#plt.plot(X0, emp_CDF0)
+#plt.plot(X1, emp_CDF1)
+#plt.show()
+
+def budstrap_num_localizations_per_patch(obs, num_patches, patch_area_nm2):
+  unit_area_nm2 = 1.
+  number_unit_areas_int = int(patch_area_nm2/unit_area_nm2)
+  numbers_localizations_per_are = []
+  for _ in range(num_patches):
+    sample = inverse_transform_samples(obs, number_unit_areas_int)
+    number_localizations_per_are = np.floor(sample.sum())#int(sample.sum())
+    numbers_localizations_per_are.append(number_localizations_per_are)
+  return np.array(numbers_localizations_per_are)
+obs = ctr_minflux_data['cluster_density_values_group1'].ravel()
+
+ctr_num_loclizations_per_patch = budstrap_num_localizations_per_patch(ctr_minflux_data['cluster_density_values_group1'].ravel(),
+                                                                      num_patches=52, patch_area_nm2=310.)
+txl_num_loclizations_per_patch = budstrap_num_localizations_per_patch(txl_minflux_data['cluster_density_values_group2'].ravel(),
+                                                                      num_patches=17, patch_area_nm2=310.)
+Po_range = np.linspace(0., 1., 100)
+ctr_Is, txl_Is = [], []
+for Po in Po_range:
+  ctr_I = Po*-2*ctr_num_loclizations_per_patch
+  txl_I = Po*-2*txl_num_loclizations_per_patch
+  ctr_Is.append([np.percentile(ctr_I, [0.5, 0.75, 0.25])])
+  txl_Is.append([np.percentile(txl_I, [0.5, 0.75, 0.25])])
+ctr_Is = np.concatenate(ctr_Is, 0)
+txl_Is = np.concatenate(txl_Is, 0)
+
+plt.plot(Po_range, ctr_Is[:,0])
+plt.plot(Po_range, txl_Is[:,0])
+plt.grid()
