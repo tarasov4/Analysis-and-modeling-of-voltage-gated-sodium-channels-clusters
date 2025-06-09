@@ -7,4 +7,6 @@ The code used in the manuscript: Tarasov et al. Clustering Dynamically Modulate 
 
 **Bayesian inference of the hidden Markov model parameters for currents idealization**: contains code for (1) loading, visualization and selection of single channel current sweeps used for subsequent inference, (2) Bayesian model for inference of the hidden Markov model parameters, (4) sampling the hidden Markov model parameters using tensorflow-probability’s NUTS sampler. 
 
-**Single NaV1.5 channel Bayesian Moreno model optimization**: contains code for (1) Bayesian inference Moreno model parameters and (2) deterministic and stochastic simulations of Markov model.
+**Single NaV1.5 channel Bayesian Moreno model optimization**: contains code for (1) Bayesian inference Moreno model parameters and (2) deterministic and stochastic simulations of Markov models.
+
+**Composite model of wild-type NaV1.5 channels**: contains code for (1) building of composite model of non-interacting and interacting NaV1.5 channels and (2) simulation of ion channel activity with these models.
