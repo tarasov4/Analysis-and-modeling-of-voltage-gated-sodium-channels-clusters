@@ -1,5 +1,6 @@
 # Analysis-and-modeling-of-voltage-gated-sodium-channels-clusters
-The code used in the manuscript: Tarasov et al. Clustering Dynamically Modulate the Biophysics of Voltage-Gated Sodium Channels: How Nanoscale Phenomena Determine Health and Disease. bioRxiv 2025.05.31.657169; doi: https://doi.org/10.1101/2025.05.31.657169
+
+The Python code used in the manuscript: Tarasov et al. Clustering Dynamically Modulate the Biophysics of Voltage-Gated Sodium Channels: How Nanoscale Phenomena Determine Health and Disease. bioRxiv 2025.05.31.657169; doi: https://doi.org/10.1101/2025.05.31.657169
 
 **Cell-attached recordings analysis**: contains functions to (1) load patch-clamp recording from .abf file, (2) adjust baseline of current sweeps, (3) measure single-channel amplitudes by fitting gaussian mixture distributions to all current amplitudes, (4) subtracting capacitive transient currents, (5) de-noisation (idealization) of current sweeps using the Viterbi algorithm, (6) plotting current sweeps, (7) ensemble averaging idealized current sweeps, (8) calculation of mean late sodium current by normalization to peak sodium currents in idealized current sweeps, (9) fitting ensemble-average peak sodium current decay to the exponential functions to estimate the time constant of peak current decay.
 
@@ -13,6 +14,6 @@ The code used in the manuscript: Tarasov et al. Clustering Dynamically Modulate 
 
 **Random simulation of channel interaction in the membrane**: contains code for simulation of channel localizations in the membrane and prediction of integral sodium currents based on numbers of interacting and noninteracting channels in pairs given deterministic simulations of composite models of WT-NaV1.5.
 
-**Stochastic simulation of Naundorf model of 2 channels**: contains code for stochastic simulation of activity of 2 interacting or non-interacting channels.
+**Stochastic simulation of Naundorf model of 2 channels**: contains code for stochastic simulation of activity of 2 interacting or non-interacting channels in the Naundorf model (PMID: 16625198).
 
 **Estimate of average single channel open probability in NaV1.5 clusters based on minflux and patch-clamp**: contains code to estimate differences in average single channel peak open probabilities in control and reduced surface expression conditions based on minflux measurements of cluster densities and ensemble average peak sodium currents in multi-channel cell-attached recordings.
