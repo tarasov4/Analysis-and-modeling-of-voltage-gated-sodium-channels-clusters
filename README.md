@@ -10,3 +10,5 @@ The code used in the manuscript: Tarasov et al. Clustering Dynamically Modulate 
 **Single NaV1.5 channel Bayesian Moreno model optimization**: contains code for (1) Bayesian inference Moreno model parameters and (2) deterministic and stochastic simulations of Markov models.
 
 **Composite models of NaV1.5 channels**: contains code for (1) building of composite model of non-interacting and interacting WT- and ΔKPQ-NaV1.5 channels in the absence and presence of lidocaine and (2) simulation of ion channel activity with these models.
+
+**Random simulation of channel interaction in the membrane**: contains code for simulation of channel localizations in the membrane and prediction of integral sodium currents based on a numbers of interacting and noninteracting channels
