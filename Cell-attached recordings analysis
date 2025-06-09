@@ -1,0 +1,247 @@
+import pyabf
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+import tensorflow as tf
+import tensorflow_probability as tfp
+tfd = tfp.distributions
+tfb = tfp.bijectors
+import scipy
+
+#functions
+
+def load_all_sweeps_pre_Icap_subtr(abf_file_path,
+                                   V_test_mV,
+                                   Icap_relaxation_t_ms,
+                                   total_t_test_ms):
+  abf = pyabf.ABF(abf_file_path)
+  t_ms = 1e3*(abf.sweepX)
+  delt_t_ms = t_ms[1] - t_ms[0]
+  V_mV = abf.sweepC
+  start_ind_test = np.where(V_mV==V_test_mV)[0][0]+int(Icap_relaxation_t_ms/delt_t_ms)
+  #end_ind_test = start_ind_test+int(total_t_test_ms/delt_t_ms)
+  end_ind_test = np.where(V_mV==V_test_mV)[0][-1]-1
+  analysis_t_ms = t_ms[start_ind_test:end_ind_test+1] - t_ms[start_ind_test]
+  I = []
+  for sweep_idx in abf.sweepList:
+    abf.setSweep(sweep_idx)
+    I_sweep = abf.sweepY[start_ind_test:end_ind_test+1]
+    I.append(I_sweep)
+  return analysis_t_ms, np.stack(I, axis=0)
+
+def two_component_robust_GMM_MAP_fit(current_sweeps):
+  y = tf.convert_to_tensor(current_sweeps.T, tf.float32)
+  nu = tf.Variable(10.*tf.ones([y.shape[-1],1]))
+  w = tf.Variable(tf.constant([0.95, 0.05])*tf.ones([y.shape[-1], 1]))
+  mu = tf.Variable(tf.constant([0., 2.5])*tf.ones([y.shape[-1], 1]))
+  sigma = tf.Variable(tf.constant([0.3, 0.5])*tf.ones([y.shape[-1], 1]))
+  def target_log_prob(nu, w, mu, sigma, y):
+    nu_prior_log_prob = tfd.Exponential(1./29.).log_prob(nu)
+    w_prior_log_prob = tfd.Dirichlet([4., 4.]).log_prob(w)
+    mu_prior_log_prob = tf.reduce_sum(tfd.Normal([0., 2.], 0.5).log_prob(mu), axis=-1)
+    sigma_prior_log_prob = tf.reduce_sum(tfd.HalfNormal([0.3, 0.5]).log_prob(sigma), axis=-1)
+    log_like = tf.reduce_sum(tfd.MixtureSameFamily(tfd.Categorical(logits=tf.math.log(w)), tfd.StudentT(nu, mu, sigma)).log_prob(y), axis=0)
+    return (nu_prior_log_prob
+            +w_prior_log_prob[..., tf.newaxis]
+            +mu_prior_log_prob[..., tf.newaxis]
+            +sigma_prior_log_prob[..., tf.newaxis]
+            +log_like[..., tf.newaxis])
+  loss = tfp.math.minimize(lambda : -target_log_prob(nu, w, mu, sigma, y), 200, tf.keras.optimizers.Adam(0.01))
+  L = target_log_prob(nu, w, mu, sigma, y)
+  k = nu.shape[-1] + w.shape[-1] + mu.shape[-1] + sigma.shape[-1]
+  BIC = k*tf.math.log(float(current_sweeps.shape[-1]))-2*L
+  return dict(nu=nu, w=w, mu=mu, sigma=sigma), BIC
+
+def one_component_robust_GMM_MAP_fit(current_sweeps):
+  y = tf.convert_to_tensor(current_sweeps, tf.float32)
+  nu = tf.Variable(10.*tf.ones([y.shape[0],1]))
+  mu = tf.Variable(tf.zeros([y.shape[0], 1]))
+  sigma = tf.Variable(0.35*tf.ones([y.shape[0], 1]))
+  def target_log_prob(nu, mu, sigma, y):
+    nu_prior_log_prob = tfd.Exponential(1./29.).log_prob(nu)
+    mu_prior_log_prob = tfd.Normal(0., 0.2).log_prob(mu)
+    sigma_prior_log_prob = tfd.HalfNormal(0.35).log_prob(sigma)
+    log_like = tf.reduce_sum(tfd.StudentT(nu, mu, sigma).log_prob(y), axis=-1)
+    return (nu_prior_log_prob
+            +mu_prior_log_prob
+            +sigma_prior_log_prob
+            +log_like[..., tf.newaxis])
+  loss = tfp.math.minimize(lambda : -target_log_prob(nu, mu, sigma, y), 200, tf.keras.optimizers.Adam(0.01))
+  L = target_log_prob(nu, mu, sigma, y)
+  k = nu.shape[-1] + mu.shape[-1] + sigma.shape[-1]
+  BIC = k*tf.math.log(float(current_sweeps.shape[-1]))-2*L
+  return dict(nu=nu, mu=mu, sigma=sigma), BIC
+
+def get_best_GMM_fit_baseline_mu(current_sweeps, one_component_params, one_component_BIC, two_component_params, two_component_BIC, plot):
+  best_model_idx = tf.reshape(tf.cast(one_component_BIC>two_component_BIC, tf.int32), -1)
+  x = np.linspace(-1.5, 3.5, 1000).astype('float32')
+  best_baseline_mu_s = []
+  single_channel_i_s = []
+  nu_s = []
+  sigma_s = []
+  for sweep_idx in range(current_sweeps.shape[0]):
+    best_model_choice = best_model_idx[sweep_idx]
+    params = [one_component_params, two_component_params][best_model_choice]
+    if best_model_choice==0:
+      best_baseline_mu_s.append(float(params['mu'][sweep_idx]))
+    else:
+      i = float(np.diff(params['mu'][sweep_idx].numpy()))
+      if i>=1.:
+        best_baseline_mu_s.append(float(tf.math.reduce_min(params['mu'][sweep_idx])))
+        single_channel_i_s.append(i)
+        nu_s.append(params['nu'][sweep_idx])
+        sigma_s.append(params['sigma'][sweep_idx])
+      else:
+        best_baseline_mu_s.append(float(params['mu'][sweep_idx].numpy()[np.argsort(params['w'][sweep_idx].numpy())][-1]))
+    if plot:
+      plt.hist(current_sweeps[sweep_idx], np.arange(-1.5, 3.5, 0.1), density=True)
+      if best_model_choice==0:
+        probs = tfd.StudentT(params['nu'][sweep_idx], params['mu'][sweep_idx], params['sigma'][sweep_idx]).prob(x)
+      elif best_model_choice==1:
+        probs = tfd.MixtureSameFamily(tfd.Categorical(logits=tf.math.log(params['w'][sweep_idx])),
+                              tfd.StudentT(params['nu'][sweep_idx], params['mu'][sweep_idx], params['sigma'][sweep_idx])).prob(x)
+      plt.plot(x, probs)
+      plt.show()
+  return np.array(best_baseline_mu_s), np.array(single_channel_i_s), nu_s, sigma_s
+
+def adjust_baseline(t_ms, I, reference_t_ms_start, reference_t_ms_end, plot_GMM_fit):
+  detla_t_ms = t_ms[1]-t_ms[0]
+  reference_I = I[:, int(reference_t_ms_start/detla_t_ms):int(reference_t_ms_end/detla_t_ms)]
+  one_component_params, one_component_BIC = one_component_robust_GMM_MAP_fit(reference_I)
+  two_component_params, two_component_BIC = two_component_robust_GMM_MAP_fit(reference_I)
+  best_baseline_mu_s, single_channel_i_s, nu_s, sigma_s = get_best_GMM_fit_baseline_mu(reference_I, one_component_params, one_component_BIC, two_component_params, two_component_BIC, plot=plot_GMM_fit)
+  I = I - best_baseline_mu_s[..., np.newaxis]
+  return t_ms, I, single_channel_i_s, nu_s, sigma_s
+
+def I_cap_subtract(V_test_mV, abf_file_path, npy_file_path, params_npy_file_path):
+  t_ms, I = load_all_sweeps_pre_Icap_subtr(abf_file_path = abf_file_path,
+                                            V_test_mV = V_test_mV,
+                                            Icap_relaxation_t_ms = 0.3,
+                                            total_t_test_ms=499.)
+  t_ms, I, single_channel_i_s, nu_s, sigma_s = adjust_baseline(t_ms, I, reference_t_ms_start=60., reference_t_ms_end=90., plot_GMM_fit=False)
+  I_cap_subtr_t_ms = 50.
+  delta_t_ms = t_ms[1]-t_ms[0]
+  t = tf.convert_to_tensor(t_ms[:int(I_cap_subtr_t_ms/delta_t_ms)], tf.float32)
+  y = tf.convert_to_tensor(I[:,:int(I_cap_subtr_t_ms/delta_t_ms)], tf.float32)
+  num_sweeps = y.shape[0]
+  τ = tf.constant([0.5, 1., 2., 3., 4., 5., 7., 10., 50.])
+  num_exp_components = τ.shape[-1]
+  D = tf.stack([tf.math.exp(-t/τ[idx]) for idx in range(τ.shape[-1])], axis=0)
+  W = tf.Variable(tf.ones([num_sweeps, num_exp_components])) #variable
+  s = tf.Variable(tf.zeros([num_sweeps, t.shape[-1]]), constraint=lambda s: tf.math.abs(s)) #variable
+  lam = 0.1
+  def target_fun(W, s, y):
+    Ihat = tf.reduce_sum(W[..., tf.newaxis]*D, axis=1)+s
+    I_error = 0.5*tf.norm(y - Ihat, ord=2, axis=-1)**2 + lam*tf.norm(s, ord=1, axis=-1)
+    return I_error[..., tf.newaxis]
+  loss = tfp.math.minimize(lambda : target_fun(W, s, y), 500, tf.keras.optimizers.Adam(0.1))
+  Ihat = tf.reduce_sum(W[..., tf.newaxis]*D, axis=1)
+  I_after_icap = (y-Ihat).numpy()
+  t, I_after_icap, _, _, _ = adjust_baseline(t.numpy(), I_after_icap, reference_t_ms_start=5., reference_t_ms_end=15., plot_GMM_fit=False)
+  I[:,:int(I_cap_subtr_t_ms/delta_t_ms)] = I_after_icap
+  np.save(npy_file_path, np.concatenate([t_ms[..., np.newaxis], I.T], axis=1))
+  if len(single_channel_i_s)>0:
+    i = tf.reduce_mean(single_channel_i_s).numpy().astype('float32')
+    sigmas = tf.reduce_mean(sigma_s, axis=0).numpy().astype('float32')
+    nu = tf.reduce_mean(nu_s)
+    params = np.concatenate([[np.array(i)], sigmas, [np.array(nu)]], axis=0)
+    np.save(params_npy_file_path, params)
+  else:
+    np.save(params_npy_file_path, np.array([1.5, 0.25, 0.4, 12.]))#np.array([2., 0.25, 0.4, 12.]))
+
+def idealize(L, npy_file_path, params_npy_file_path, ideal_npy_file):
+  record = np.load(npy_file_path)
+  params = np.load(params_npy_file_path).astype('float32')
+  t_ms, I = (record[:,0], record[:,1:].T)
+  delta_t_ms = t_ms[1]-t_ms[0]
+  i, sigmas, nu = (params[0], params[1:3], params[3])
+  p = 0.01
+  init_probs = tf.ones(L)/L
+  transmat = p*tf.ones([L,L])
+  transmat = tf.linalg.set_diag(transmat, 1.-tf.reduce_sum(transmat, axis=-1)+p)
+  obs_dist = tfd.Cauchy(np.arange(L).astype('float32')*i, tf.concat([tf.ones([1,])*sigmas[0], tf.ones([L-1,])*sigmas[1]], axis=0))
+  hmm = tfd.HiddenMarkovModel(tfd.Categorical(logits=tf.math.log(init_probs)),
+                        tfd.Categorical(logits=tf.math.log(transmat)),
+                        obs_dist,
+                        int(10./delta_t_ms))
+
+  #states = tf.concat([hmm.posterior_mode(I[:, step*int(10./delta_t_ms):(step+1)*int(10./delta_t_ms)].astype('float32'))
+                      #for step in range(int(490/10))], axis=1)
+  I = I[:, :-int(I.shape[-1]%(int(10./delta_t_ms)))].astype('float32')
+  I_stack = I.reshape([-1, int(10./delta_t_ms)])
+  states = tf.reshape(hmm.posterior_mode(I_stack), I.shape)
+  I_ideal = tf.gather(obs_dist.loc, states).numpy()
+  ideal_t_ms = np.arange(0., delta_t_ms*I_ideal.shape[-1], delta_t_ms)
+  np.save(ideal_npy_file, np.concatenate([ideal_t_ms[..., np.newaxis], I_ideal.T], axis=1))
+
+def peak_INa_and_I_L_percent(ideal_npy_file_path):
+  record = np.load(ideal_npy_file_path)
+  t_ms, I = (record[:, 0], record[:,1:].T)
+  I = I.mean(0)
+  delta_t_ms = t_ms[1]-t_ms[0]
+  return np.array([I[:int(50./delta_t_ms)].max(), 100*I[int(50./delta_t_ms):].mean()/I[:int(50./delta_t_ms)].max()])
+
+def plot_idealization(npy_file_path, ideal_npy_file_path, time_ms_window):
+  record = np.load(npy_file_path)
+  ideal = np.load(ideal_npy_file_path)
+  t, I = (record[:,0], record[:,1:])
+  delta_t_ms = t[1]-t[0]
+  ideal_t, ideal_I = (ideal[:,0], ideal[:,1:])
+  for sweep in range(I.shape[-1]):
+    print(sweep)
+    plt.figure(figsize=(18,2))
+    plt.plot(t[int(time_ms_window[0]/delta_t_ms):int(time_ms_window[1]/delta_t_ms)], I[int(time_ms_window[0]/delta_t_ms):int(time_ms_window[1]/delta_t_ms),sweep])
+    plt.plot(ideal_t[int(time_ms_window[0]/delta_t_ms):int(time_ms_window[1]/delta_t_ms)], ideal_I[int(time_ms_window[0]/delta_t_ms):int(time_ms_window[1]/delta_t_ms),sweep], alpha=0.5, lw=4.)
+    plt.show()
+
+def get_current_sweeps(npy_file_path, time_ms_window, list_of_sweeps):
+  record = np.load(npy_file_path)
+  t, I = (record[:,0], record[:,1:])
+  delta_t_ms = t[1]-t[0]
+  return pd.DataFrame(record[int(time_ms_window[0]/delta_t_ms):int(time_ms_window[1]/delta_t_ms), list_of_sweeps])
+
+def get_number_of_open_channels(ideal_path):
+  df = np.load(ideal_path)
+  t_ms, I = (df[:,0], df[:,1:])
+  i_s = np.unique(I)
+  N = np.zeros_like(I)
+  for n,i in np.ndenumerate(i_s):
+    N = np.where(I==i, n, N)
+  return N
+
+def decay_fit(list_of_ideal_paths):
+  Y = np.stack([get_number_of_open_channels(ideal_path).mean(1) for ideal_path in list_of_ideal_paths], axis=0)
+  Y_max = Y.max(1, keepdims=True)
+  Y_decay_start_ind = [np.where(Y[record_ind]==Y_max[record_ind])[0][-1]+int(0.01/0.01) for record_ind in range(Y.shape[0])]
+  Y_decay = np.stack([Y[record_ind][Y_decay_start_ind[record_ind]:int(13/0.01)+Y_decay_start_ind[record_ind]] for record_ind in range(Y.shape[0])], axis=0).astype('float32')
+  Y_decay = Y_decay - Y_decay[:, -int(5/0.01):].mean(1, keepdims=True)
+  Y_norm_decay = Y_decay/Y_decay.max(1, keepdims=True)
+  Y_norm_decay = Y_norm_decay.astype('float32')
+  decay_t_ms = 0.01*np.arange(Y_norm_decay.shape[-1]).astype('float32')
+  tau = tf.Variable(tf.ones([Y.shape[0],1]))
+  #C = tf.Variable(tf.zeros([Y.shape[0],1]))
+  #h = lambda tau, C: tf.math.exp(-decay_t_ms/tau)+C
+  h = lambda tau: tf.math.exp(-decay_t_ms/tau)
+  #loss_fn = lambda tau, C: tf.reduce_sum((Y_norm_decay-h(tau,C))**2, axis=-1)[..., tf.newaxis]
+  loss_fn = lambda tau: tf.reduce_sum((Y_norm_decay-h(tau))**2, axis=-1)[..., tf.newaxis]
+  #loss = tfp.math.minimize(lambda : loss_fn(tau,C), 500, tf.keras.optimizers.Adam(0.001))
+  loss = tfp.math.minimize(lambda : loss_fn(tau), 500, tf.keras.optimizers.Adam(0.001))
+  for _ in range(Y_norm_decay.shape[0]):
+    plt.plot(decay_t_ms, Y_norm_decay[_])
+    #plt.plot(decay_t_ms, h(tau, C)[_])
+    plt.plot(decay_t_ms, h(tau)[_])
+    plt.show()
+  return pd.DataFrame(tau.numpy())
+
+def get_INa_average(list_of_ideal_paths, delta_t_ms, duration_ms):
+  I_concat = np.concatenate([np.load(list_of_ideal_paths[idx])[:int(duration_ms/delta_t_ms),1:].mean(1, keepdims=True) for idx in range(len(list_of_ideal_paths))], axis=1)
+  I_concat_mean = I_concat.mean(1)
+  I_concat_sem = I_concat.std(1)/np.sqrt( I_concat.shape[-1])
+  return pd.DataFrame(dict(mean=-I_concat_mean, sem=I_concat_sem))
+
+def get_decay_INa_average(list_of_ideal_paths, delta_t_ms, duration_ms, thr):
+  I_concat = [np.load(list_of_ideal_paths[idx])[:,1:].mean(1) for idx in range(len(list_of_ideal_paths))]
+  max_inds = [np.where(I_concat[idx]==I_concat[idx].max())[0][0] for idx in range(len(I_concat))]
+  decay_I_concat = [-I_concat[idx][max_inds[idx]:max_inds[idx]+int(duration_ms/delta_t_ms)]/I_concat[idx][max_inds[idx]] for idx in range(len(I_concat))
+  if I_concat[idx][max_inds[idx]]>thr]
+  return np.stack([delta_t_ms*np.arange(decay_I_concat[0].shape[0])]+decay_I_concat).T
