@@ -6,3 +6,5 @@ The code used in the manuscript: Tarasov et al. Clustering Dynamically Modulate 
 **Quantification of functional interaction between channels**: contains functions to (1) fitting mean-variance relations in numbers of open channels to the binomial mean-variance relations, (2) calculation of Kullback–Leibler divergence and (3) variance-to-mean ratio (coefficient of dispersion) in numbers of open channels based on idealized current sweeps.
 
 **Bayesian inference of the hidden Markov model parameters for currents idealization**: contains code for (1) loading, visualization and selection of single channel current sweeps used for subsequent inference, (2) Bayesian model for inference of the hidden Markov model parameters, (4) sampling the hidden Markov model parameters using tensorflow-probability’s NUTS sampler. 
+
+**Single NaV1.5 channel Bayesian Moreno model optimization**: contains code for (1) Bayesian inference Moreno model parameters and (2) deterministic and stochastic simulations of Markov model.
