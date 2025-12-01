@@ -17,3 +17,5 @@ The Python code used in the manuscript: Tarasov et al. Clustering Dynamically Mo
 **Stochastic simulation of Naundorf model of 2 channels**: contains code for stochastic simulation of activity of 2 interacting or non-interacting channels in the Naundorf model (PMID: 16625198).
 
 **Estimate of average single channel open probability in NaV1.5 clusters based on minflux and patch-clamp**: contains code to estimate differences in average single channel peak open probabilities in control and reduced surface expression conditions based on minflux measurements of cluster densities and ensemble average peak sodium currents in multi-channel cell-attached recordings.
+
+**cluster analysis MINFLUX**: contains custom code used for analysis NaV1.5 cluster density in MINFLUX localization data.
