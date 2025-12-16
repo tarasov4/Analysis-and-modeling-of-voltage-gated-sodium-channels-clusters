@@ -19,3 +19,16 @@ The Python code used in the manuscript: Tarasov et al. Clustering Dynamically Mo
 **Estimate of average single channel open probability in NaV1.5 clusters based on minflux and patch-clamp**: contains code to estimate differences in average single channel peak open probabilities in control and reduced surface expression conditions based on minflux measurements of cluster densities and ensemble average peak sodium currents in multi-channel cell-attached recordings.
 
 **cluster analysis MINFLUX**: contains custom code used for analysis NaV1.5 cluster density in MINFLUX localization data.
+
+**System requirements**: All files except "cluster analysis MINFLUX" is written and tested in Python3 in Google Colab. "cluster analysis MINFLUX" is written and tested in MATLAB R2025b. List of dependencies for Python3: numpy, scipy, matplotlib, scikit-learn, tensorflow, tensorflow_probability, pyabf, pandas. No non-standard hardware is required. 
+
+**Installation**:
+Do not require installation.
+
+**Demo**:
+The following demo demonstrates application of this software for capacitive current subtraction and idealization of a cell-attached patch-clamp recording.
+
+Input specifies file paths: .abf file, file after capacitive current subtraction, parameters of idealization, idealized file. _I_cap_subtract_ function takes a test potential value, start of analysis after test potential application, and file paths; _idealize_ function takes estimate of a maximal number of simultaneously open channels in all current sweeps and file paths; _plot_idealization_ function takes file paths and a time window to plot.
+<img width="4614" height="1089" alt="image" src="https://github.com/user-attachments/assets/9966f754-9f4b-4366-ad24-2dedd6aab54a" />
+Output contains plots of a signal after capacitive current subtraction (blue) and idealization (orange). Axes: time after test potential application (ms) and current (pA). Expected runtime: 10 seconds per sweep:
+<img width="4467" height="1376" alt="image" src="https://github.com/user-attachments/assets/40b1d4bc-cf2d-4fd3-a426-cb4ee7d20c00" />
