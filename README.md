@@ -32,3 +32,5 @@ Input specifies file paths: .abf file, file after capacitive current subtraction
 <img width="4614" height="1089" alt="image" src="https://github.com/user-attachments/assets/9966f754-9f4b-4366-ad24-2dedd6aab54a" />
 Output contains plots of a signal after capacitive current subtraction (blue) and idealization (orange). Axes: time after test potential application (ms) and current (pA). Expected runtime: 10 seconds per sweep:
 <img width="4467" height="1376" alt="image" src="https://github.com/user-attachments/assets/40b1d4bc-cf2d-4fd3-a426-cb4ee7d20c00" />
+
+DOI: 10.5281/zenodo.18499384
